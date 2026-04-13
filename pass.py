@@ -4,5 +4,5 @@
 #     print(i)
 
 
-sum = 5 * 6
-print(sum)
+sum1 = 5 * 6
+print(sum1)
