@@ -16,3 +16,176 @@ Datadog Agent installed / ensured running
         ↓
 Scheduled once per day (cron or AWX)
 
+✅ Step‑by‑Step Implementation
+1️⃣ CMDB CSV Example (Assumption)
+hostname,ip,env,role,os
+web01,10.10.1.1,prod,web,rhel
+web02,10.10.1.2,prod,web,ubuntu
+db01,10.10.2.1,prod,db,rhel
+2️⃣ Convert CSV → Ansible Dynamic Inventory
+Ansible cannot read CSV directly, so we convert it into a dynamic inventory script.
+✅ Python inventory script (cmdb_inventory.py)
+#!/usr/bin/env python3
+import csv
+import json
+
+inventory = {
+    "_meta": {"hostvars": {}},
+}
+
+with open("cmdb_dump.csv") as f:
+    reader = csv.DictReader(f)
+    for row in reader:
+        hostname = row["hostname"]
+
+        # Create groups dynamically
+        for group in [row["env"], row["role"], row["os"]]:
+            inventory.setdefault(group, {"hosts": []})
+            inventory[group]["hosts"].append(hostname)
+
+        # Host variables
+        inventory["_meta"]["hostvars"][hostname] = {
+            "ansible_host": row["ip"],
+            "env": row["env"],
+            "role": row["role"],
+            "os": row["os"]
+        }
+
+print(json.dumps(inventory))
+
+Make executable : chmod +x cmdb_inventory.py
+3️⃣ Ansible Inventory Usage
+ansible-inventory -i cmdb_inventory.py --graph
+✅ Validate groups like:
+4️⃣ Datadog Agent Deployment Playbook
+✅ Variables (group_vars/all.yml)
+datadog_api_key: "YOUR_DATADOG_API_KEY"
+datadog_site: "datadoghq.com"
+- name: Install Datadog Agent
+  hosts: prod
+  become: yes
+  gather_facts: yes
+  serial: 500          # IMPORTANT for 20k servers
+  tasks:
+
+    - name: Install Datadog on RHEL
+      shell: |
+        DD_API_KEY={{ datadog_api_key }} \
+        DD_SITE={{ datadog_site }} \
+        bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script.sh)"
+      args:
+        creates: /etc/datadog-agent/datadog.yaml
+      when: ansible_os_family == "RedHat"
+
+    - name: Install Datadog on Ubuntu
+      shell: |
+        DD_API_KEY={{ datadog_api_key }} \
+        DD_SITE={{ datadog_site }} \
+        bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script.sh)"
+      args:
+        creates: /etc/datadog-agent/datadog.yaml
+      when: ansible_os_family == "Debian"
+
+    - name: Ensure Datadog agent is running
+      service:
+        name: datadog-agent
+        state: started
+        enabled: yes
+5️⃣ Scheduling: Run Once Per Day
+Cron job:
+crontab -e
+30 01 * * * cd /opt/ansible && ansible-playbook \
+  -i cmdb_inventory.py deploy_datadog.yml >> datadog.log 2>&1
+6️⃣ Performance & Safety Settings (CRITICAL for 20k hosts)
+[defaults]
+forks = 200
+gathering = smart
+fact_caching = jsonfile
+fact_caching_connection = /tmp/ansible_facts
+timeout = 30
+host_key_checking = False
+7️⃣ Recommended Run Pattern (Very Important)
+-l prod
+-l prod:&web
+-l prod:!deprecated
+
+serial: 500
+
+-----------------------------------------------------------------------------------------------------------------------------
+
+✅ Goal Recap
+Use case:
+
+CMDB CSV refreshed once per day
+Deploy Datadog only on new servers
+Avoid re-running on existing ones
+Fully automated, safe, auditable
+
+
+OPTION 1 (Recommended): Delta via Facts on Target Hosts
+If Datadog is installed, the agent config file exists: /etc/datadog-agent/datadog.yaml
+So:
+
+New server → file missing → install
+Existing server → file exists → skip 
+
+1️⃣ Inventory remains CMDB‑driven (same as before)
+ansible-playbook -i cmdb_inventory.py deploy_datadog.yml
+2️⃣ Delta‑Aware Datadog Playbook
+- name: Install Datadog agent only on new servers
+  hosts: prod
+  become: yes
+  gather_facts: no
+  serial: 500
+
+  tasks:
+    - name: Check if Datadog is already installed
+      stat:
+        path: /etc/datadog-agent/datadog.yaml
+      register: datadog_installed
+
+    - name: Install Datadog agent (new servers only)
+      shell: |
+        DD_API_KEY={{ datadog_api_key }} \
+        DD_SITE={{ datadog_site }} \
+        bash -c "$(curl -L https://s3.amazonaws.com/dd-agent/scripts/install_script.sh)"
+      when: not datadog_installed.stat.exists
+
+    - name: Ensure Datadog agent is running
+      service:
+        name: datadog-agent
+        state: started
+        enabled: yes
+      when: datadog_installed.stat.exists or true
+
+OPTION 2: Pre‑Filter Inventory (Advanced / CMDB‑Heavy)
+
+Flow: cmdb_2024-04-14.csv
+cmdb_2024-04-15.csv
+↓
+diff → new hosts
+↓
+generate inventory_new_hosts.ini
+↓
+run ansible
+
+-------------------------------------------------------------------------------------------------------
+What is getting solved:
+Problem Statement :
+We had more than 20,000 servers, and the server inventory was maintained in a CMDB, which provided a CSV data dump once per day.
+The requirement was to deploy the Datadog agent only on newly added servers, not on servers where the agent was already installed, 
+and to run this automation daily in a safe and scalable way.
+
+✅ High‑Level Solution
+We designed a CMDB‑driven, delta‑based Ansible automation where:
+
+CMDB acts as the source of truth for hosts
+Ansible uses a dynamic inventory generated from the CSV
+Delta detection is handled using host‑side state, not central tracking
+The playbook is idempotent and safe to run daily
+Execution is throttled to avoid impacting production
+
+“We had around twenty thousand servers, with inventory coming from a CMDB as a daily CSV dump. Our goal was to deploy the Datadog agent only on newly added servers and avoid touching hosts where it was already installed.
+We converted the CMDB CSV into a dynamic Ansible inventory using a small script, grouping hosts by environment, role, and OS. This allowed us to target servers cleanly without maintaining large static inventories.
+For delta detection, we relied on host‑side state instead of tracking servers centrally. Before installing Datadog, Ansible checks whether the Datadog config file already exists on the host. If it exists, the host is skipped; if not, the agent is installed. This makes the playbook idempotent and safe to run repeatedly.
+The playbook runs once per day via cron or AWX, uses rolling deployments with the serial option for safety, and automatically onboards new servers. This approach scaled well, stayed simple, and kept the CMDB as the single source of truth.”
