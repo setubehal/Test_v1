@@ -1,0 +1,18 @@
+Use case : To deploy Datadog agents on 20k server in large scale enterprise
+
+✅ CMDB CSV file refreshed once per day
+✅ 20k+ servers
+✅ Goal: deploy / ensure Datadog agent is installed & configured
+✅ Run once per day automatically
+
+✅High Level flow : 
+Daily CMDB CSV dump
+        ↓
+CSV → Dynamic Inventory (generated or read)
+        ↓
+ Ansible Playbook
+        ↓
+Datadog Agent installed / ensured running
+        ↓
+Scheduled once per day (cron or AWX)
+
